@@ -2,10 +2,32 @@ from pathlib import Path
 
 import io
 import json
+import warnings
+import logging
+from typing import Optional, Dict
+
 import numpy as np
 import streamlit as st
 import pandas as pd
 import joblib
+
+# Reduce noisy Streamlit "missing ScriptRunContext" logs
+logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
+
+# Suppress sklearn version mismatch warning when unpickling models saved with
+# an older scikit-learn. This prevents the long InconsistentVersionWarning
+# messages from cluttering the logs while keeping functionality.
+try:
+    from sklearn.exceptions import InconsistentVersionWarning
+    warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+except Exception:
+    # If sklearn isn't installed yet in this environment, just continue;
+    # installation should be performed in the project's venv.
+    pass
+
+# Configure module logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -18,15 +40,117 @@ def load_model():
         st.error("Model file not found. Please make sure car_price_prediction.pkl is in the app folder.")
         return None
 
-    return joblib.load(MODEL_PATH)
+    try:
+        return joblib.load(MODEL_PATH)
+    except Exception as exc:
+        st.error(f"Failed to load model: {exc}")
+        return None
 
+
+st.set_page_config(page_title="Car Price Prediction", page_icon="🚗", layout="wide")
 
 model = load_model()
 
 if model is None:
     st.stop()
 
-st.set_page_config(page_title="Car Price Prediction", page_icon="🚗", layout="wide")
+
+def prepare_sample_df(present_price, kms_driven, owner, car_age, fuel, seller, transmission, model):
+    """Build a DataFrame with column names matching the trained model's
+    expected features. Handles both raw categorical features (e.g. 'Fuel_Type')
+    and one-hot encoded features (e.g. 'Fuel_Type_Petrol').
+    """
+    base = {
+        "Present_Price": present_price,
+        "Kms_Driven": kms_driven,
+        "Owner": owner,
+        "Car_Age": car_age,
+    }
+
+    # Try to read feature names the model was trained with
+    feature_names = getattr(model, "feature_names_in_", None)
+
+    # Helper to fill common categorical representations
+    def fill_categorical(d):
+        # Provide both string and numeric encodings to maximize compatibility
+        # Numeric mappings used in the notebook training pipeline
+        fuel_map = {"Petrol": 0, "Diesel": 1, "CNG": 2}
+        seller_map = {"Dealer": 0, "Individual": 1}
+        trans_map = {"Manual": 0, "Automatic": 1}
+
+        d.setdefault("Fuel_Type", fuel_map.get(fuel, fuel))
+        d.setdefault("Seller_Type", seller_map.get(seller, seller))
+        d.setdefault("Transmission", trans_map.get(transmission, transmission))
+        d.setdefault("Fuel_Type_Diesel", 1 if fuel == "Diesel" else 0)
+        d.setdefault("Fuel_Type_Petrol", 1 if fuel == "Petrol" else 0)
+        d.setdefault("Seller_Type_Individual", 1 if seller == "Individual" else 0)
+        d.setdefault("Transmission_Manual", 1 if transmission == "Manual" else 0)
+
+    if feature_names is None:
+        # Unknown feature names — include both raw and one-hot forms to maximize
+        # compatibility. The model will ignore unknown columns automatically.
+        fill_categorical(base)
+        return pd.DataFrame([base])
+
+    # Build row dict matching the model feature order
+    row = {}
+
+    # Provide mapping values for raw categorical features
+    fuel_map = {"Petrol": 0, "Diesel": 1, "CNG": 2}
+    seller_map = {"Dealer": 0, "Individual": 1}
+    trans_map = {"Manual": 0, "Automatic": 1}
+
+    for fname in feature_names:
+        if fname in base:
+            row[fname] = base[fname]
+        elif fname == "Fuel_Type":
+            # encode fuel as numeric if model expects numeric
+            row[fname] = fuel_map.get(fuel, fuel)
+        elif fname == "Seller_Type":
+            row[fname] = seller_map.get(seller, seller)
+        elif fname == "Transmission":
+            row[fname] = trans_map.get(transmission, transmission)
+        elif fname == "Fuel_Type_Diesel":
+            row[fname] = 1 if fuel == "Diesel" else 0
+        elif fname == "Fuel_Type_Petrol":
+            row[fname] = 1 if fuel == "Petrol" else 0
+        elif fname == "Seller_Type_Individual":
+            row[fname] = 1 if seller == "Individual" else 0
+        elif fname == "Transmission_Manual":
+            row[fname] = 1 if transmission == "Manual" else 0
+        else:
+            # Unknown feature expected by model — fill a safe default
+            row[fname] = 0
+
+    return pd.DataFrame([row])
+
+
+@st.cache_data(ttl=300)
+def predict_price(sample_df: pd.DataFrame) -> Optional[float]:
+    """Predict price using the loaded model. Results are cached for 5 minutes.
+
+    Returns predicted price as float or None on failure.
+    """
+    try:
+        pred = model.predict(sample_df)
+        return float(pred[0])
+    except Exception as e:
+        logger.exception("Prediction error")
+        return None
+
+
+def validate_inputs(present_price: float, kms_driven: int, owner: int, car_age: int) -> Optional[str]:
+    """Return None if inputs valid, otherwise an error message string."""
+    if present_price < 0:
+        return "Present price must be non-negative."
+    if kms_driven < 0:
+        return "Kilometers driven must be non-negative."
+    if owner < 0:
+        return "Owner count must be non-negative."
+    if car_age < 0:
+        return "Car age must be non-negative."
+    return None
+
 
 # Initialize session state defaults for inputs
 defaults = {
@@ -180,6 +304,22 @@ with col1:
     # Use two inner columns for inputs to use space well
     i1, i2 = st.columns([1, 1])
 
+    # --- Helper to reset inputs safely via button callback ---
+    def _reset_inputs():
+        st.session_state.update(
+            {
+                "present_price": 5.0,
+                "kms_driven": 10000,
+                "owner": 0,
+                "car_age": 3,
+                "fuel": "Petrol",
+                "seller": "Dealer",
+                "transmission": "Manual",
+            }
+        )
+        # Rerun to reflect the reset values in widgets
+        st.experimental_rerun()
+
     with i1:
         present_price = st.number_input("💰 Present Price (Lakhs)", min_value=0.0, step=0.1, value=5.0, key="present_price")
         kms_driven = st.number_input("🛣️ Kilometers Driven", min_value=0, step=1000, value=10000, key="kms_driven")
@@ -196,50 +336,46 @@ with col1:
     with action_col1:
         predict_clicked = st.button("Predict Price", use_container_width=True)
     with action_col2:
-        reset_clicked = st.button("Reset Inputs", use_container_width=True)
+        # Use on_click to update session_state before widgets render
+        reset_clicked = st.button("Reset Inputs", on_click=_reset_inputs, use_container_width=True)
     with action_col3:
         save_clicked = st.button("Save Result", use_container_width=True)
 
-    if reset_clicked:
-        # reset session state keys to defaults
-        st.session_state.present_price = 5.0
-        st.session_state.kms_driven = 10000
-        st.session_state.owner = 0
-        st.session_state.car_age = 3
-        st.session_state.fuel = "Petrol"
-        st.session_state.seller = "Dealer"
-        st.session_state.transmission = "Manual"
-        st.experimental_rerun()
+    # Note: reset is handled by the on_click callback `_reset_inputs` above.
 
     result_json = None
     if predict_clicked:
-        sample = pd.DataFrame(
-            {
-                "Present_Price": [present_price],
-                "Kms_Driven": [kms_driven],
-                "Owner": [owner],
-                "Car_Age": [car_age],
-                "Fuel_Type_Diesel": [1 if fuel == "Diesel" else 0],
-                "Fuel_Type_Petrol": [1 if fuel == "Petrol" else 0],
-                "Seller_Type_Individual": [1 if seller == "Individual" else 0],
-                "Transmission_Manual": [1 if transmission == "Manual" else 0],
-            }
-        )
+        err = validate_inputs(present_price, kms_driven, owner, car_age)
+        if err is not None:
+            st.error(err)
+            predicted_price = None
+        else:
+            sample = prepare_sample_df(
+                present_price,
+                kms_driven,
+                owner,
+                car_age,
+                fuel,
+                seller,
+                transmission,
+                model,
+            )
+            predicted_price = predict_price(sample)
+            if predicted_price is None:
+                st.error("Prediction failed; check model and inputs.")
 
-        prediction = model.predict(sample)
-        predicted_price = float(prediction[0])
-
-        # show result card
-        st.markdown(
-            f"""
-            <div style="margin-top: 1rem; padding: 1.1rem 1.2rem; border-radius: 16px; background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); border: 1px solid #93c5fd;">
-                <h3 style="margin:0 0 0.35rem 0; color:#1e3a8a; font-weight:900;">Estimated Selling Price</h3>
-                <div style="font-size: 2rem; font-weight: 900; color:#020617;">₹ {predicted_price:.2f} Lakhs</div>
-                <p style="margin:0.25rem 0 0 0; color:#0f172a; font-weight:700;">Based on the details you entered.</p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        # show result card (only when prediction succeeded)
+        if predicted_price is not None:
+            st.markdown(
+                f"""
+                <div style="margin-top: 1rem; padding: 1.1rem 1.2rem; border-radius: 16px; background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); border: 1px solid #93c5fd;">
+                    <h3 style="margin:0 0 0.35rem 0; color:#1e3a8a; font-weight:900;">Estimated Selling Price</h3>
+                    <div style="font-size: 2rem; font-weight: 900; color:#020617;">₹ {predicted_price:,.2f} Lakhs</div>
+                    <p style="margin:0.25rem 0 0 0; color:#0f172a; font-weight:700;">Based on the details you entered.</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
         # prepare downloadable result
         result = {
@@ -253,6 +389,13 @@ with col1:
             "Predicted_Price_Lakhs": predicted_price,
         }
         result_json = json.dumps(result, indent=2)
+
+    # Save result: offer a download immediately when user clicks "Save Result"
+    if save_clicked:
+        if result_json is not None:
+            st.download_button("Download result (JSON)", data=result_json, file_name="prediction_result.json", mime="application/json")
+        else:
+            st.info("Make a prediction first to save the result.")
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -298,31 +441,33 @@ with st.expander("Advanced: Sensitivity & Export", expanded=False):
 
         sens_kms = []
         for k in kms_range:
-            sf = pd.DataFrame({
-                "Present_Price": [st.session_state.get("present_price", 5.0)],
-                "Kms_Driven": [k],
-                "Owner": [st.session_state.get("owner", 0)],
-                "Car_Age": [st.session_state.get("car_age", 3)],
-                "Fuel_Type_Diesel": [1 if st.session_state.get("fuel", "Petrol") == "Diesel" else 0],
-                "Fuel_Type_Petrol": [1 if st.session_state.get("fuel", "Petrol") == "Petrol" else 0],
-                "Seller_Type_Individual": [1 if st.session_state.get("seller", "Dealer") == "Individual" else 0],
-                "Transmission_Manual": [1 if st.session_state.get("transmission", "Manual") == "Manual" else 0],
-            })
-            sens_kms.append(float(model.predict(sf)[0]))
+            sf = prepare_sample_df(
+                st.session_state.get("present_price", 5.0),
+                int(k),
+                st.session_state.get("owner", 0),
+                st.session_state.get("car_age", 3),
+                st.session_state.get("fuel", "Petrol"),
+                st.session_state.get("seller", "Dealer"),
+                st.session_state.get("transmission", "Manual"),
+                model,
+            )
+            p = predict_price(sf)
+            sens_kms.append(float(p) if p is not None else float('nan'))
 
         sens_age = []
         for a in ages:
-            sf = pd.DataFrame({
-                "Present_Price": [st.session_state.get("present_price", 5.0)],
-                "Kms_Driven": [st.session_state.get("kms_driven", 10000)],
-                "Owner": [st.session_state.get("owner", 0)],
-                "Car_Age": [a],
-                "Fuel_Type_Diesel": [1 if st.session_state.get("fuel", "Petrol") == "Diesel" else 0],
-                "Fuel_Type_Petrol": [1 if st.session_state.get("fuel", "Petrol") == "Petrol" else 0],
-                "Seller_Type_Individual": [1 if st.session_state.get("seller", "Dealer") == "Individual" else 0],
-                "Transmission_Manual": [1 if st.session_state.get("transmission", "Manual") == "Manual" else 0],
-            })
-            sens_age.append(float(model.predict(sf)[0]))
+            sf = prepare_sample_df(
+                st.session_state.get("present_price", 5.0),
+                st.session_state.get("kms_driven", 10000),
+                st.session_state.get("owner", 0),
+                int(a),
+                st.session_state.get("fuel", "Petrol"),
+                st.session_state.get("seller", "Dealer"),
+                st.session_state.get("transmission", "Manual"),
+                model,
+            )
+            p = predict_price(sf)
+            sens_age.append(float(p) if p is not None else float('nan'))
 
         df_kms = pd.DataFrame({"Kms": kms_range, "Predicted_Lakhs": sens_kms}).set_index("Kms")
         df_age = pd.DataFrame({"Age": ages, "Predicted_Lakhs": sens_age}).set_index("Age")
