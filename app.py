@@ -317,8 +317,11 @@ with col1:
                 "transmission": "Manual",
             }
         )
-        # Rerun to reflect the reset values in widgets
-        st.experimental_rerun()
+            # No explicit rerun call: Streamlit will re-run the script after the
+            # callback completes. Calling `st.experimental_rerun()` is not
+            # available in all Streamlit builds (some environments raise
+            # AttributeError). Avoid calling it directly to preserve
+            # compatibility; updating `st.session_state` is sufficient.
 
     with i1:
         present_price = st.number_input("💰 Present Price (Lakhs)", min_value=0.0, step=0.1, value=5.0, key="present_price")
