@@ -490,9 +490,14 @@ with st.expander("Advanced: Sensitivity & Export", expanded=False):
     except Exception as e:
         st.error(f"Could not build sensitivity charts: {e}")
 
-    # Provide download if result available
-    if 'result_json' in locals() and result_json is not None:
-        st.download_button("Download result (JSON)", data=result_json, file_name="prediction_result.json", mime="application/json")
+    # Provide download if result available in session state
+    if st.session_state.result_json is not None:
+        st.download_button(
+            "Download result (JSON)",
+            data=st.session_state.result_json,
+            file_name="prediction_result.json",
+            mime="application/json",
+        )
     else:
         st.info("Make a prediction first to download the result.")
 
