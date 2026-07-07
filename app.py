@@ -167,6 +167,12 @@ for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
+if "result_json" not in st.session_state:
+    st.session_state["result_json"] = None
+
+if "predicted_price" not in st.session_state:
+    st.session_state["predicted_price"] = None
+
 st.markdown(
     """
     <style>
@@ -346,12 +352,11 @@ with col1:
 
     # Note: reset is handled by the on_click callback `_reset_inputs` above.
 
-    result_json = None
     if predict_clicked:
         err = validate_inputs(present_price, kms_driven, owner, car_age)
         if err is not None:
             st.error(err)
-            predicted_price = None
+            st.session_state.predicted_price = None
         else:
             sample = prepare_sample_df(
                 present_price,
@@ -363,24 +368,22 @@ with col1:
                 transmission,
                 model,
             )
-            predicted_price = predict_price(sample)
-            if predicted_price is None:
+            st.session_state.predicted_price = predict_price(sample)
+            if st.session_state.predicted_price is None:
                 st.error("Prediction failed; check model and inputs.")
 
-        # show result card (only when prediction succeeded)
-        if predicted_price is not None:
+        if st.session_state.predicted_price is not None:
             st.markdown(
                 f"""
                 <div style="margin-top: 1rem; padding: 1.1rem 1.2rem; border-radius: 16px; background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); border: 1px solid #93c5fd;">
                     <h3 style="margin:0 0 0.35rem 0; color:#1e3a8a; font-weight:900;">Estimated Selling Price</h3>
-                    <div style="font-size: 2rem; font-weight: 900; color:#020617;">₹ {predicted_price:,.2f} Lakhs</div>
+                    <div style="font-size: 2rem; font-weight: 900; color:#020617;">₹ {st.session_state.predicted_price:,.2f} Lakhs</div>
                     <p style="margin:0.25rem 0 0 0; color:#0f172a; font-weight:700;">Based on the details you entered.</p>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
-        # prepare downloadable result
         result = {
             "Present_Price": present_price,
             "Kms_Driven": kms_driven,
@@ -389,14 +392,18 @@ with col1:
             "Fuel": fuel,
             "Seller": seller,
             "Transmission": transmission,
-            "Predicted_Price_Lakhs": predicted_price,
+            "Predicted_Price_Lakhs": st.session_state.predicted_price,
         }
-        result_json = json.dumps(result, indent=2)
+        st.session_state.result_json = json.dumps(result, indent=2)
 
-    # Save result: offer a download immediately when user clicks "Save Result"
     if save_clicked:
-        if result_json is not None:
-            st.download_button("Download result (JSON)", data=result_json, file_name="prediction_result.json", mime="application/json")
+        if st.session_state.result_json is not None:
+            st.download_button(
+                "Download result (JSON)",
+                data=st.session_state.result_json,
+                file_name="prediction_result.json",
+                mime="application/json",
+            )
         else:
             st.info("Make a prediction first to save the result.")
 
