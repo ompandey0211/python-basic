@@ -40,3 +40,9 @@ streamlit run app.py
 ```
 
 Upload an image and view the prediction.
+
+## Model File
+
+The trained model (`image_classifier.keras`) is not included in this repository because of GitHub upload limitations.
+
+Run the notebook (`Image_Recognition_Project.ipynb`) to train the model and generate `image_classifier.keras`.
