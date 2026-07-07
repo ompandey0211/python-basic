@@ -1,0 +1,10 @@
+streamlit>=1.0
+# Allow pip to pick a scikit-learn wheel compatible with the local Python
+# (building older scikit-learn from source fails on newer Python versions).
+scikit-learn
+pandas
+numpy
+joblib
+# Optional plotting libs used in the notebook
+matplotlib
+seaborn
